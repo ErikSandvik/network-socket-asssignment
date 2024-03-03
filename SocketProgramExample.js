@@ -1,7 +1,9 @@
 const net = require('net');
 const crypto = require('crypto');
 
-// Simple HTTP server responds with a simple WebSocket client test
+// Map to keep track of each client's connection state and handshake status
+const clients = new Map();
+
 const httpServer = net.createServer((connection) => {
     connection.on('data', () => {
         let content = `<!DOCTYPE html>
@@ -38,56 +40,49 @@ httpServer.listen(3000, () => {
     console.log('HTTP server listening on port 3000');
 });
 
-
-// Incomplete WebSocket server
 const wsServer = net.createServer((connection) => {
-    let handshakeIsDone = false;
     console.log('Client connected');
 
-    connection.on('data', (data) => {
-        if (!handshakeIsDone) {
-            const headers = data.toString();
-            console.log('Headers: ', headers);
-            // Checks if there has been a handshake request already or not
-            if (headers.match(/Upgrade: websocket/i) && headers.match(/Connection: Upgrade/i)) {
-                //handles handshake
+    clients.set(connection, {handshakeCompleted: false});
 
+    connection.on('data', (data) => {
+        if (!clients.get(connection).handshakeCompleted) {
+            const headers = data.toString();
+            if (headers.match(/Upgrade: websocket/i) && headers.match(/Connection: Upgrade/i)) {
                 const key = (headers.match(/Sec-WebSocket-Key: (.+)/) || [null, null])[1].trim();
                 const guid = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
-                let combined = key + guid;
-                const accept = crypto.createHash('sha1').update(combined).digest('base64');
-                const response = "HTTP/1.1 101 Switching Protocols\r\n" + "Upgrade: websocket\r\n" +
-                    "Connection: Upgrade\r\n" + "Sec-WebSocket-Accept: " + accept + "\r\n\r\n";
-
+                const accept = crypto.createHash('sha1').update(key + guid).digest('base64');
+                const response = [
+                    "HTTP/1.1 101 Switching Protocols",
+                    "Upgrade: websocket",
+                    "Connection: Upgrade",
+                    `Sec-WebSocket-Accept: ${accept}`,
+                    "\r\n"
+                ].join("\r\n");
                 connection.write(response);
-
-                console.log("Handshake executed")
-                handshakeIsDone = true;
+                clients.get(connection).handshakeCompleted = true;
             }
         } else {
-            //handling socket frames
             const message = parseFrame(data);
-            console.log('Received:', message);
-
-            sendTextMessage(connection, 'Echo: ' + message);
+            broadcastMessage('Broadcast: ' + message);
+            console.log('Message received:', message);
         }
     });
 
     connection.on('end', () => {
-
         console.log('Client disconnected');
+        // Remove the client from the map
+        clients.delete(connection);
     });
 
-});
-
-wsServer.on('error', (error) => {
-    console.error('Error: ', error);
+    connection.on('error', (error) => {
+        console.error('Error: ', error);
+        clients.delete(connection);
+    });
 });
 wsServer.listen(3001, () => {
     console.log('WebSocket server listening on port 3001');
 });
-
-
 
 function parseFrame(buffer) {
     const fin = buffer[0] & 0x80;
@@ -98,11 +93,11 @@ function parseFrame(buffer) {
     let maskingKey;
     let payload;
 
-    if(masked) {
+    if (masked) {
         maskingKey = buffer.slice(currentOffset, currentOffset + 4);
         currentOffset += 4;
         payload = buffer.slice(currentOffset, currentOffset + payloadLength);
-        for(let i = 0; i < payload.length; i++) {
+        for (let i = 0; i < payload.length; i++) {
             payload[i] ^= maskingKey[i % 4];
         }
     }
@@ -115,9 +110,18 @@ function sendTextMessage(connection, message) {
     const length = buffer.length;
     let frame = Buffer.alloc(2 + length);
 
-    frame[0] = 0x81;
-    frame[1] = length;
+    frame[0] = 0x81; // Text frame opcode
+    frame[1] = length; // Payload length
 
-    buffer.copy(frame, 2);
+    buffer.copy(frame, 2); // Copy the message payload into the frame
     connection.write(frame);
 }
+
+function broadcastMessage(message) {
+    clients.forEach((value, key) => {
+        if (value.handshakeCompleted) {
+            sendTextMessage(key, message);
+        }
+    });
+}
+``
